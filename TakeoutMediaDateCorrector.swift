@@ -13,11 +13,36 @@
 
 import Foundation
 
-var takeoutFolder = "/Users/jliebowitz/Downloads/Google Backup/Takeout/Google Photos/"
+let takeoutFolder: String
+var sortIntoDateFolder = true
+let dateFormatter = DateFormatter()
+dateFormatter.dateFormat = "MM"
 
-if CommandLine.arguments.count == 2 {
-  takeoutFolder = CommandLine.arguments[1]
+let exampleLaunchCommand = "\(CommandLine.arguments[0]) <path_to_folder_containing_media> [--organize true|false]"
+if CommandLine.argc == 1 {
+  print("🤷‍♂️ missing path: \(exampleLaunchCommand)")
+  exit(-1)
 }
+
+if CommandLine.argc == 2 || CommandLine.argc == 4 {
+  takeoutFolder = CommandLine.arguments[1]
+  if CommandLine.argc == 4 {
+    if CommandLine.arguments[2] != "--organize" {
+      print("🤷‍♂️ Unrecognized arg \(CommandLine.arguments[2])")
+      exit(-1)
+    }
+    guard let organize = Bool(CommandLine.arguments[3]) else {
+      print("🤷‍♂️ Unrecognized value for \(CommandLine.arguments[2]): \(CommandLine.arguments[3])")
+      exit(-1)
+    }
+    sortIntoDateFolder = organize
+  }
+} else {
+  print("🤷‍♂️ invalid launch args. Try again: \(exampleLaunchCommand)")
+  exit(-1)
+}
+
+print(CommandLine.arguments)
 
 guard FileManager.default.fileExists(atPath: takeoutFolder) else {
   print("❌ Folder \(takeoutFolder) doesn't exist")
@@ -25,6 +50,16 @@ guard FileManager.default.fileExists(atPath: takeoutFolder) else {
 }
 
 print("📂 Folder set to \(takeoutFolder)")
+
+extension FileManager {
+  func moveItemCreatingIntermediaryDirectoriesIfNeeded(atURL : URL, toURL: URL) throws {
+    let parentPath = toURL.deletingLastPathComponent()
+    if !fileExists(atPath: parentPath.path) {
+      try createDirectory(at: parentPath, withIntermediateDirectories: true, attributes: nil)
+    }
+    try moveItem(at: atURL, to: toURL)
+  }
+}
 
 struct MediaBundle: Codable {
   let media: Media
@@ -96,6 +131,13 @@ struct FailedMedia: Codable {
   let createdDate: Date?
   let modifiedDate: Date?
   let failureReason: String
+  let duringMove: Bool
+}
+
+struct SetAttributeResult {
+  let failedMedia: FailedMedia?
+  let jsonFileURL: URL?
+  let mediaFilePath: String?
 }
 
 struct FailedMediaReport: Codable {
@@ -142,6 +184,72 @@ func loadMediaBundles(fromJSONFileURLS urls: [URL]) -> [MediaBundle] {
   return mediaBundles
 }
 
+func failedMedia(mediaBundle: MediaBundle, 
+                 createdDate: Date, 
+                 modifiedDate: Date, 
+                 error: Error,
+                 duringMove: Bool = false) -> FailedMedia {
+  return FailedMedia(mediaBundle: mediaBundle,
+    mediaURL: mediaBundle.mediaFileURL,
+    alternateMediaURL: mediaBundle.alternateMediaFileURL(),
+    createdDate: createdDate,
+    modifiedDate: modifiedDate, 
+    failureReason: error.localizedDescription,
+    duringMove: duringMove)
+}
+
+func setAttributes(createdDate: Date, modifiedDate: Date, mediaBundle: MediaBundle) -> SetAttributeResult {
+  let attributes = [
+    FileAttributeKey.creationDate: createdDate, 
+    FileAttributeKey.modificationDate: modifiedDate
+  ]
+  var mediaPathInUse: String = mediaBundle.mediaFileURL.relativePath
+  do {
+    try FileManager.default.setAttributes(attributes, ofItemAtPath: mediaPathInUse)
+  } catch {
+    let nsError = error as NSError
+    if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError {
+      do {
+        mediaPathInUse = mediaBundle.alternateMediaFileURL().relativePath
+        try FileManager.default.setAttributes(attributes, ofItemAtPath: mediaPathInUse)
+      } catch {
+        let failedMedia = failedMedia(mediaBundle: mediaBundle, 
+                                      createdDate: createdDate, 
+                                      modifiedDate: modifiedDate, 
+                                      error: error)
+        return SetAttributeResult(failedMedia: failedMedia, jsonFileURL: nil, mediaFilePath: nil)
+      }
+    } else {
+      let failedMedia = failedMedia(mediaBundle: mediaBundle, 
+                                    createdDate: createdDate, 
+                                    modifiedDate: modifiedDate, 
+                                    error: error)
+      return SetAttributeResult(failedMedia: failedMedia, jsonFileURL: nil, mediaFilePath: nil)
+    }
+  }
+  return SetAttributeResult(failedMedia: nil, jsonFileURL: mediaBundle.jsonURL, mediaFilePath: mediaPathInUse)
+}
+
+func organizeMediaIntoMonths(atMediaFilePath mediaFilePath: String, jsonFileURL: URL, createdDate: Date) -> Error? {
+  let monthString = dateFormatter.string(from: createdDate)
+  let mediaFileURL = URL(fileURLWithPath: mediaFilePath)
+  let newFileURL = mediaFileURL.deletingLastPathComponent()
+                               .appendingPathComponent(monthString)
+                               .appendingPathComponent(mediaFileURL.lastPathComponent)
+  print("from: \(mediaFileURL.absoluteString)")
+  print("to  : \(newFileURL.absoluteString)")
+  do {
+    try FileManager.default.moveItemCreatingIntermediaryDirectoriesIfNeeded(atURL: mediaFileURL, toURL: newFileURL)
+    let newJSONFileURL = jsonFileURL.deletingLastPathComponent()
+                                    .appendingPathComponent(monthString)
+                                    .appendingPathComponent(jsonFileURL.lastPathComponent)
+    try FileManager.default.moveItemCreatingIntermediaryDirectoriesIfNeeded(atURL: jsonFileURL, toURL: newJSONFileURL)
+  } catch {
+    return error
+  }
+  return nil
+}
+
 func setCreateAndModifiedDate(fromMediaBundles mediaBundles: [MediaBundle]) -> [FailedMedia] {
   var failed: [FailedMedia] = []
   for mediaBundle in mediaBundles {
@@ -155,7 +263,8 @@ func setCreateAndModifiedDate(fromMediaBundles mediaBundles: [MediaBundle]) -> [
                                   alternateMediaURL: mediaBundle.alternateMediaFileURL(),
                                   createdDate: nil, 
                                   modifiedDate: nil, 
-                                  failureReason: "Created timestamp missing"))
+                                  failureReason: "Created timestamp missing",
+                                  duringMove: false))
         continue
     }
     guard let modifiedTimestamp = mediaBundle.media.photoLastModifiedTime?.timestamp else {
@@ -164,40 +273,32 @@ func setCreateAndModifiedDate(fromMediaBundles mediaBundles: [MediaBundle]) -> [
                                 alternateMediaURL: mediaBundle.alternateMediaFileURL(),
                                 createdDate: nil, 
                                 modifiedDate: nil, 
-                                failureReason: "Modified timestamp missing"))
+                                failureReason: "Modified timestamp missing",
+                                duringMove: false))
       continue
     }
+    
     let createdDate = Date(timeIntervalSince1970: Double(createdTimestamp)!)
     let modifiedDate = Date(timeIntervalSince1970: Double(modifiedTimestamp)!)
-    let attributes = [
-      FileAttributeKey.creationDate: createdDate, 
-      FileAttributeKey.modificationDate: modifiedDate
-    ]
-    do {
-      try FileManager.default.setAttributes(attributes, ofItemAtPath: mediaBundle.mediaFileURL.relativePath)
-    } catch {
-      let nsError = error as NSError
-      if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError {
-        do {
-          let alternateFileURL = mediaBundle.alternateMediaFileURL()
-          try FileManager.default.setAttributes(attributes, ofItemAtPath: alternateFileURL.relativePath)
-        } catch {
-          failed.append(FailedMedia(mediaBundle: mediaBundle,
-            mediaURL: mediaBundle.mediaFileURL,
-            alternateMediaURL: mediaBundle.alternateMediaFileURL(),
-            createdDate: createdDate,
-            modifiedDate: modifiedDate, 
-            failureReason: error.localizedDescription))
-        }
-      } else {
-        failed.append(FailedMedia(mediaBundle: mediaBundle, 
-          mediaURL: mediaBundle.mediaFileURL,
-          alternateMediaURL: mediaBundle.alternateMediaFileURL(),
-          createdDate: createdDate, 
-          modifiedDate: modifiedDate, 
-          failureReason: error.localizedDescription))
-      }
+    let result = setAttributes(createdDate: createdDate, modifiedDate: modifiedDate, mediaBundle: mediaBundle)
+    if let failedMedia = result.failedMedia {
+      failed.append(failedMedia)
+      continue
     }
+    if sortIntoDateFolder {
+      if let error = organizeMediaIntoMonths(
+        atMediaFilePath: result.mediaFilePath!, 
+        jsonFileURL: result.jsonFileURL!, 
+        createdDate: createdDate) {
+          failed.append(failedMedia(mediaBundle: mediaBundle, 
+                                    createdDate: createdDate, 
+                                    modifiedDate: modifiedDate, 
+                                    error: error, 
+                                    duringMove: true))
+      }
+      
+    }
+    
   }
   return failed
 }
