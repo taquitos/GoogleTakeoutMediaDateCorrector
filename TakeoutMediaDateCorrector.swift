@@ -13,7 +13,18 @@
 
 import Foundation
 
-let takeoutFolder = "/Users/jliebowitz/Downloads/Google Backup/Takeout/Google Photos/"
+var takeoutFolder = "/Users/jliebowitz/Downloads/Google Backup/Takeout/Google Photos/"
+
+if CommandLine.arguments.count == 2 {
+  takeoutFolder = CommandLine.arguments[1]
+}
+
+guard FileManager.default.fileExists(atPath: takeoutFolder) else {
+  print("❌ Folder \(takeoutFolder) doesn't exist")
+  exit(-1)
+}
+
+print("📂 Folder set to \(takeoutFolder)")
 
 struct MediaBundle: Codable {
   let media: Media
