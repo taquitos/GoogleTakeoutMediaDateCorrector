@@ -14,7 +14,7 @@
 import Foundation
 
 let takeoutFolder: String
-var sortIntoDateFolder = true
+var sortIntoDateFolder = false
 let dateFormatter = DateFormatter()
 dateFormatter.dateFormat = "MM"
 
@@ -236,8 +236,6 @@ func organizeMediaIntoMonths(atMediaFilePath mediaFilePath: String, jsonFileURL:
   let newFileURL = mediaFileURL.deletingLastPathComponent()
                                .appendingPathComponent(monthString)
                                .appendingPathComponent(mediaFileURL.lastPathComponent)
-  print("from: \(mediaFileURL.absoluteString)")
-  print("to  : \(newFileURL.absoluteString)")
   do {
     try FileManager.default.moveItemCreatingIntermediaryDirectoriesIfNeeded(atURL: mediaFileURL, toURL: newFileURL)
     let newJSONFileURL = jsonFileURL.deletingLastPathComponent()
